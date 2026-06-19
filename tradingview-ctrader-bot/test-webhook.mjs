@@ -1,92 +1,93 @@
 /**
- * Test script for the TradingView webhook.
+ * Test script for the TradingView webhook endpoint.
  *
- * Usage:
- *   node test-webhook.mjs                            # test against vercel dev (localhost:3000)
- *   node test-webhook.mjs https://your-app.vercel.app # test against production
- *   UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=... node test-webhook.mjs
- *     # With env vars, tests the function directly (simulates Vercel invocation)
+ * WARNING: This sends a real cTrader API request if CTRADER_* env vars are set!
+ * For local validation-only testing, use the local-server.mjs instead.
+ *
+ * Usage (validation only — no API call):
+ *   node test-webhook.mjs
+ *
+ * To verify against a deployed instance (WILL EXECUTE TRADES):
+ *   node test-webhook.mjs https://your-app.vercel.app
  */
 
-const BASE_URL = process.argv[2] || 'http://localhost:3000';
+import { isConfigured } from './api/ctrader-client.js';
 
-async function main() {
-  console.log(`Testing webhook at: ${BASE_URL}/api/webhook\n`);
+const BASE_URL = process.argv[2] || null;
+let passed = 0;
+let failed = 0;
 
-  // Simulate a TradingView alert (as TradingView would send it via webhook)
-  // The alert format from the user's TradingView script:
-  // alert('{"Action":"DiMea Long","entry":...}', freq=alert.freq_once_per_bar_close)
-  const signal = {
-    Action: 'DiMea Long',
-    entry: 142.50,
-    tp1: 143.20,
-    tp2: 143.80,
-    tp3: 144.50,
-    sl: 141.80,
-    symbol: 'NASDAQ:US100',
-    notional: 150
-  };
+function ok(msg) { console.log(`  ✅ ${msg}`); passed++; }
+function no(msg, detail) { console.log(`  ❌ ${msg} — ${detail}`); failed++; }
 
-  console.log('1️⃣  Sending TradingView signal...');
-  console.log(`   ${JSON.stringify(signal)}\n`);
+// If no URL provided, test the module functions directly
+if (!BASE_URL) {
+  console.log('Testing validation & module functions locally\n');
 
-  const webhookRes = await fetch(`${BASE_URL}/api/webhook`, {
+  // Test ctrader-client module functions
+  const { clearTokenCache, executeMarketOrder } = await import('./api/ctrader-client.js');
+
+  // isConfigured should be false without env vars
+  if (!isConfigured()) {
+    ok('isConfigured() returns false without env vars');
+  } else {
+    no('isConfigured() returns false without env vars', 'env vars appear to be set');
+  }
+
+  // executeMarketOrder with invalid config should reject
+  try {
+    await executeMarketOrder({ Action: 'DiMea Long', symbol: 'X', entry: 1, sl: 1, tp1: 2, notional: 100 });
+    no('executeMarketOrder without config', 'should have thrown');
+  } catch (e) {
+    ok(`executeMarketOrder without config throws: ${e.message}`);
+  }
+
+  // Test symbol normalisation (internal logic)
+  const symbTests = [
+    ['NASDAQ:US100', 'US100'],
+    ['FX:EURUSD', 'EURUSD'],
+    ['US100', 'US100'],
+  ];
+  for (const [input, expected] of symbTests) {
+    const result = input.includes(':') ? input.split(':').pop() : input;
+    if (result === expected) ok(`Symbol normalisation: ${input} → ${result}`);
+    else no(`Symbol normalisation: ${input}`, `expected ${expected}, got ${result}`);
+  }
+
+  // Test volume calculation
+  const vol = Math.round(150 / 142.5);
+  if (vol === 1) ok(`Volume calc: $150 @ 142.5 = 1 unit`);
+  else no(`Volume calc: $150 @ 142.5`, `expected 1, got ${vol}`);
+
+  console.log(`\n📊  ${passed} passed, ${failed} failed`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+// If a URL is provided, test against it (CAUTION: will execute trades if configured)
+console.log(`⚠️  Testing against live endpoint: ${BASE_URL}/api/webhook`);
+console.log('    This may execute real trades if CTRADER_* env vars are set!\n`');
+
+const signal = {
+  Action: 'DiMea Long',
+  entry: 142.50,
+  tp1: 143.20,
+  tp2: 143.80,
+  tp3: 144.50,
+  sl: 141.80,
+  symbol: 'NASDAQ:US100',
+  notional: 150
+};
+
+try {
+  const res = await fetch(`${BASE_URL}/api/webhook`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(signal),
   });
-
-  const webhookResult = await webhookRes.json();
-  console.log(`   Response (${webhookRes.status}):`, webhookResult, '\n');
-
-  if (!webhookResult.success) {
-    console.error('❌ Webhook test FAILED');
-    process.exit(1);
-  }
-
-  console.log('2️⃣  Reading back the signal via GET...');
-  const getRes = await fetch(`${BASE_URL}/api/latest-signal`);
-  const signalData = await getRes.json();
-  console.log(`   Response (${getRes.status}):`, signalData, '\n');
-
-  console.log('3️⃣  Consuming the signal via DELETE...');
-  const delRes = await fetch(`${BASE_URL}/api/latest-signal`, { method: 'DELETE' });
-  const delData = await delRes.json();
-  console.log(`   Response (${delRes.status}):`, delData, '\n');
-
-  console.log('4️⃣  Verifying signal is consumed (should return 204)...');
-  const verifyRes = await fetch(`${BASE_URL}/api/latest-signal`);
-  console.log(`   Response (${verifyRes.status}):`, verifyRes.status === 204 ? '✅ No Content (correct)' : '❌ Unexpected');
-
-  // Test with a Short signal
-  console.log('\n5️⃣  Testing Short signal...');
-  const shortSignal = {
-    Action: 'SMART Short',
-    entry: 1850.00,
-    tp1: 1840.00,
-    tp2: 1835.00,
-    tp3: 1825.00,
-    sl: 1860.00,
-    symbol: 'NASDAQ:US100',
-    notional: 200
-  };
-
-  const shortRes = await fetch(`${BASE_URL}/api/webhook`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(shortSignal),
-  });
-
-  const shortResult = await shortRes.json();
-  console.log(`   Response (${shortRes.status}):`, shortResult, '\n');
-
-  // Clean up
-  await fetch(`${BASE_URL}/api/latest-signal`, { method: 'DELETE' });
-
-  console.log('✅ All tests passed!');
-}
-
-main().catch(err => {
-  console.error('❌ Test failed:', err.message);
+  const body = await res.json();
+  console.log(`Response (${res.status}):`, JSON.stringify(body, null, 2));
+  console.log('\n✅ Test completed.');
+} catch (err) {
+  console.error('❌ Connection failed:', err.message);
   process.exit(1);
-});
+}

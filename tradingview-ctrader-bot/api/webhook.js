@@ -1,24 +1,18 @@
-import { Redis } from '@upstash/redis';
-
-// Use in-memory store as fallback when Redis is not configured (e.g., local testing)
-let memoryStore = null;
-
-async function getStore() {
-  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    return {
-      type: 'redis',
-      client: new Redis({
-        url: process.env.UPSTASH_REDIS_REST_URL,
-        token: process.env.UPSTASH_REDIS_REST_TOKEN,
-      }),
-    };
-  }
-  return { type: 'memory' };
-}
+import { executeMarketOrder, isConfigured } from './ctrader-client.js';
 
 export const config = {
   runtime: 'nodejs',
 };
+
+/**
+ * Normalise a TradingView symbol to cTrader format.
+ * e.g. "NASDAQ:US100" → "US100", "FX:GBPUSD" → "GBPUSD"
+ */
+function normaliseSymbol(sym) {
+  if (!sym) return null;
+  const idx = sym.lastIndexOf(':');
+  return idx >= 0 && idx < sym.length - 1 ? sym.substring(idx + 1).trim() : sym.trim();
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -28,7 +22,8 @@ export default async function handler(req, res) {
   try {
     const signal = req.body;
 
-    // Validate required fields
+    // ── Validation ──
+
     if (!signal || !signal.Action || !signal.symbol) {
       return res.status(400).json({
         error: 'Missing required fields: Action, symbol',
@@ -36,15 +31,13 @@ export default async function handler(req, res) {
       });
     }
 
-    // Validate Action format — must end with " Long" or " Short"
     if (!signal.Action.endsWith(' Long') && !signal.Action.endsWith(' Short')) {
       return res.status(400).json({
-        error: 'Action must end with " Long" or " Short" (e.g., "DiMea Long")',
+        error: 'Action must end with " Long" or " Short"',
         received: signal.Action,
       });
     }
 
-    // Validate numeric fields
     if (typeof signal.entry !== 'number' || signal.entry <= 0) {
       return res.status(400).json({ error: 'entry must be a positive number', received: signal.entry });
     }
@@ -55,40 +48,37 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'notional must be a positive number', received: signal.notional });
     }
 
-    // Add timestamp and a unique ID
-    signal._receivedAt = new Date().toISOString();
-    signal._id = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    // ── Check config ──
 
-    // Store the signal
-    const store = await getStore();
-
-    if (store.type === 'redis') {
-      const redis = store.client;
-      await redis.set('tradingview:latest_signal', signal);
-      await redis.lpush('tradingview:signal_history', signal);
-      await redis.ltrim('tradingview:signal_history', 0, 99);
-    } else {
-      memoryStore = signal;
+    if (!isConfigured()) {
+      return res.status(500).json({
+        error: 'cTrader API not configured',
+        hint: 'Set CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_EMAIL, CTRADER_PASSWORD, and CTRADER_ACCOUNT_ID environment variables',
+      });
     }
 
-    console.log('Signal stored:', signal._id, signal.Action, signal.symbol);
+    // ── Execute trade ──
+
+    const ctSymbol = normaliseSymbol(signal.symbol);
+
+    console.log(`Executing trade: ${signal.Action} ${ctSymbol} entry=${signal.entry} sl=${signal.sl} tp=${signal.tp1} notional=${signal.notional}`);
+
+    const result = await executeMarketOrder(signal);
+
+    console.log('Trade executed:', JSON.stringify(result));
 
     return res.status(200).json({
       success: true,
-      id: signal._id,
-      message: `Signal stored for ${signal.symbol} - ${signal.Action}`,
+      trade: {
+        symbol: result.symbol,
+        side: result.tradeSide,
+        volume: result.volume,
+      },
+      requestId: result.requestId,
+      message: `${result.tradeSide} ${result.symbol} placed`,
     });
   } catch (error) {
     console.error('Webhook error:', error);
-    return res.status(500).json({ error: 'Internal server error', detail: error.message });
+    return res.status(500).json({ error: error.message });
   }
-}
-
-// Export memory store for testing
-export function getMemoryStore() {
-  return memoryStore;
-}
-
-export function clearMemoryStore() {
-  memoryStore = null;
 }

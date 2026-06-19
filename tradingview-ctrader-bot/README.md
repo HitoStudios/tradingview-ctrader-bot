@@ -1,6 +1,8 @@
-# TradingView → cTrader Signal Bot
+# TradingView → cTrader (Open API)
 
-Receives TradingView webhook alerts via **Vercel**, queues them in **Upstash Redis**, and a **cBot running in cTrader Automate Cloud** polls for signals and executes trades with multi-level take profits.
+Receives TradingView webhook alerts via **Vercel** and executes trades directly via the **cTrader Open API (REST)**.
+
+No cBot, no polling, no Redis — a single serverless function trades for you.
 
 ## Architecture
 
@@ -8,136 +10,79 @@ Receives TradingView webhook alerts via **Vercel**, queues them in **Upstash Red
 TradingView Alert (JSON POST)
         │
         ▼
-  ┌─────────────────┐
-  │  Vercel Function │  POST /api/webhook
-  │  (serverless)    │  Validates & stores signal
-  └────────┬────────┘
+  ┌─────────────────────────┐
+  │  Vercel Function         │  POST /api/webhook
+  │  (serverless, Node.js)   │  Validates → calls cTrader REST API
+  └────────┬────────────────┘
            │
            ▼
-  ┌─────────────────┐
-  │  Upstash Redis   │  Latest signal stored as key/value
-  │  (free tier)     │  + history (last 100 signals)
-  └────────┬────────┘
-           │
-  ┌────────▼────────┐
-  │  cBot polls      │  GET /api/latest-signal (every 5-60s)
-  │  cTrader Cloud   │  DELETE /api/latest-signal after execution
-  └────────┬────────┘
+  ┌─────────────────────────┐
+  │  cTrader Open API        │  POST /v1/positions/market
+  │  (OAuth2 password grant) │  Market order with SL + TP
+  └────────┬────────────────┘
            │
            ▼
      Trade Executed!
-     ┌── SL (hard stop)
-     ├── TP1 (1/3 volume)
-     ├── TP2 (1/3 volume)
-     └── TP3 (1/3 volume)
+     ┌── SL (stop-loss)
+     └── TP1 (take-profit on the order)
 ```
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 18+ installed
-- A cTrader account on **Pipfarm** with **cTrader Automate Cloud** access
-- Your trading strategy configured in **TradingView** with webhook alerts
-- (For production) A [Vercel](https://vercel.com) account (free tier)
-- (For production) An [Upstash](https://console.upstash.com) Redis database (free tier)
+- A cTrader account (Pipfarm or any broker using cTrader)
+- [Node.js](https://nodejs.org/) 18+ for local testing
+- A [Vercel](https://vercel.com) account (free tier) for deployment
 
-## Local Testing (No Redis Needed)
+## Setup
 
-You can test the full webhook flow on your own machine with zero setup:
+### 1. Register a cTrader API Application
 
-```bash
-# Start the local dev server
-cd tradingview-ctrader-bot
-node local-server.mjs
-```
+1. Go to [https://idp.ctrader.com/](https://idp.ctrader.com/)
+2. Click **Register** → create an app (use any name, e.g. `TradingView Bot`)
+3. Note your **Client ID** and **Client Secret**
 
-Output:
-```
-🌐  Server running at http://localhost:3000
-📥  POST /api/webhook         — Receive TradingView alerts
-📤  GET  /api/latest-signal    — Read latest signal
-🗑️   DELETE /api/latest-signal  — Consume (delete) signal
-```
+### 2. Find Your Account ID
 
-Then in another terminal:
+1. Open cTrader desktop/mobile app
+2. Go to your account details
+3. Note the numeric **Account ID** (e.g. `11223344`)
+
+### 3. Deploy to Vercel
 
 ```bash
-# Test with a sample signal
-curl -X POST http://localhost:3000/api/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"Action":"DiMea Long","entry":142.5,"tp1":143.2,"tp2":143.8,"tp3":144.5,"sl":141.8,"symbol":"NASDAQ:US100","notional":150}'
-
-# Response: {"success":true,"id":"...","message":"Signal stored for NASDAQ:US100 - DiMea Long"}
-
-# Read back the signal (as the cBot does)
-curl http://localhost:3000/api/latest-signal
-
-# Consume the signal (cBot does this after executing)
-curl -X DELETE http://localhost:3000/api/latest-signal
-
-# Verify it's consumed (returns 204 No Content)
-curl -v http://localhost:3000/api/latest-signal
-```
-
-Or run the full test suite:
-
-```bash
-node test-webhook.mjs http://localhost:3000
-node test-integration.mjs
-```
-
-> **No Redis or cloud accounts needed** — the local server uses an in-memory store.
-> Everything resets when you stop the server.
-
-## Production Setup (Vercel + Upstash)
-
-### Step 1: Deploy the Vercel Webhook
-
-```bash
-# Install Vercel CLI
+# Install Vercel CLI & log in
 npm install -g vercel
-
-# Clone/deploy
-cd tradingview-ctrader-bot
 vercel login
-vercel --prod
+
+# Deploy
+cd tradingview-ctrader-bot
+vercel
 ```
 
-Vercel will ask you to link the project. Follow the prompts.
+When prompted, link the project (follow the prompts — Vercel will auto-detect the config).
 
-### Step 2: Configure Upstash Redis
-
-1. Go to [Upstash Console](https://console.upstash.com) → Create Database
-2. Choose a region close to your Vercel deployment (e.g., `us-east-1`)
-3. Copy the **REST URL** and **REST Token**
-
-### Step 3: Set Environment Variables in Vercel
+### 4. Set Environment Variables
 
 ```bash
-vercel env add UPSTASH_REDIS_REST_URL
-# Paste your Upstash REST URL
+vercel env add CTRADER_CLIENT_ID
+vercel env add CTRADER_CLIENT_SECRET
+vercel env add CTRADER_EMAIL
+vercel env add CTRADER_PASSWORD
+vercel env add CTRADER_ACCOUNT_ID
 
-vercel env add UPSTASH_REDIS_REST_TOKEN
-# Paste your Upstash REST Token
-
-vercel --prod  # Redeploy with env vars
+vercel --prod  # Redeploy with secrets
 ```
 
-Or set them in the Vercel Dashboard: Project → Settings → Environment Variables.
+Or set them in the Vercel Dashboard → Project → Settings → Environment Variables.
 
-After deployment, note your Vercel URL: `https://your-project.vercel.app`
+Your webhook URL will be: `https://your-project.vercel.app/api/webhook`
 
-### Step 4: Configure TradingView Alert
+### 5. Configure TradingView Alert
 
-In your TradingView chart, create an alert with this **Webhook URL**:
-
-```
-https://your-project.vercel.app/api/webhook
-```
-
-Your alert message should be JSON (you already have this):
+Create an alert with the **Webhook URL** set to your Vercel endpoint and the JSON message:
 
 ```pinescript
-alert('{"Action":"DiMea Long","entry":' + str.tostring(entryPrice) + ',"tp1":' + str.tostring(tp1Price) + ',"tp2":' + str.tostring(tp2Price) + ',"tp3":' + str.tostring(tp3Price) + ',"sl":' + str.tostring(hardSL) + ',"symbol":"' + syminfo.tickerid + '","notional":150}', freq=alert.freq_once_per_bar_close)
+alert('{"Action":"DiMea Long","entry":' + str.tostring(entryPrice) + ',"tp1":' + str.tostring(tp1Price) + ',"sl":' + str.tostring(hardSL) + ',"symbol":"' + syminfo.tickerid + '","notional":150}', freq=alert.freq_once_per_bar_close)
 ```
 
 **Expected JSON format:**
@@ -146,97 +91,57 @@ alert('{"Action":"DiMea Long","entry":' + str.tostring(entryPrice) + ',"tp1":' +
 |-------|------|---------|-------------|
 | `Action` | string | `"DiMea Long"` | Must end with `" Long"` or `" Short"` |
 | `entry` | number | `142.50` | Entry price |
-| `tp1` | number | `143.20` | Take profit 1 |
-| `tp2` | number | `143.80` | Take profit 2 |
-| `tp3` | number | `144.50` | Take profit 3 |
-| `sl` | number | `141.80` | Hard stop loss |
+| `tp1` | number | `143.20` | Take profit price |
+| `sl` | number | `141.80` | Stop loss price |
 | `symbol` | string | `"NASDAQ:US100"` | TradingView ticker ID |
 | `notional` | number | `150` | Trade value in USD |
 
-### Step 5: Set Up the cBot in cTrader Automate Cloud
+> **Note:** Symbol is auto-normalised — `NASDAQ:US100` → `US100`, `FX:EURUSD` → `EURUSD`, etc. Part after the last colon is used as the cTrader symbol name.
 
-#### Symbol Mapping
+## Local Testing (Validation Only)
 
-TradingView uses ticker IDs like `NASDAQ:US100`, `FX:EURUSD`, etc., but cTrader uses different symbol names (e.g., `US100`, `EURUSD`).
-
-The cBot has a **Symbol Mappings** parameter where you define mappings:
-
-```
-NASDAQ:US100:US100, FX:EURUSD:EURUSD, BINANCE:BTCUSDT:BTCUSD
-```
-
-Format: `TV_SYMBOL:CTRADER_SYMBOL` separated by commas.
-
-#### Deployment
-
-1. **Copy the cBot code** from `cbot/SignalBot.cs`
-2. Open **cTrader** → **Automate** → **cBot** tab
-3. Click **New cBot** → paste the code → **Save** (name it `SignalBot`)
-4. In cTrader Automate Cloud:
-   - Go to **cTrader Automate** → **Cloud** tab
-   - Click **Deploy Bot** → select **SignalBot**
-   - Configure the parameters (see below)
-
-#### cBot Parameters
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| **Vercel Base URL** | Your deployed Vercel app URL | `https://your-project.vercel.app` |
-| **Polling Interval (sec)** | How often to check for signals (5-60) | `10` |
-| **Default Notional ($)** | Trade size in USD if signal omits it | `150` |
-| **Symbol Mappings** | TV symbol → cTrader symbol mappings | `NASDAQ:US100:US100, FX:EURUSD:EURUSD` |
-
-## Testing the Webhook
+The local server tests **parsing and validation only** — it never calls the cTrader API:
 
 ```bash
-# Test locally (no Redis needed — uses in-memory fallback)
-node test-integration.mjs
+node local-server.mjs
+# Open http://localhost:3000/api/test
+```
 
-# Test against your deployed Vercel app
-node test-webhook.mjs https://your-project.vercel.app
+Or run the module tests:
+
+```bash
+node test-webhook.mjs
 ```
 
 ## How It Works
 
-### Webhook Flow (Vercel)
+1. **TradingView** sends a JSON `POST` to `/api/webhook`
+2. **Vercel function** validates all required fields
+3. Gets an **OAuth2 access token** from `idp.ctrader.com` (password grant)
+4. Sends a **market order** via `POST /v1/positions/market` with SL + TP
+5. Returns trade result as JSON
 
-1. TradingView sends a `POST` with JSON to `/api/webhook`
-2. The function validates all required fields
-3. Stores the signal in Upstash Redis (overwrites previous pending signal)
-4. Also appends to a history list (keeps last 100 signals)
-5. Returns `{ success: true, id: "..." }`
+### Volume Calculation
 
-### cBot Flow (cTrader Cloud)
+Volume is calculated as `round(notional / entry)` — e.g. $150 notional / $142.50 entry = 1 unit.
 
-1. **OnTick**: Every N seconds, sends `GET /api/latest-signal`
-2. If a signal exists:
-   - Maps the TradingView symbol → cTrader symbol
-   - Checks no position exists for this symbol (avoids duplicates)
-   - Calculates volume from notional value
-   - Places a **market order** with SL at `hardSL`
-   - Places **3 take-profit limit orders** at TP1, TP2, TP3 (1/3 volume each)
-   - Sends `DELETE /api/latest-signal` to consume the signal
-3. If TP volumes are below the symbol's minimum, falls back to setting TP1 on the position
+### Symbol Normalisation
 
-### Signal Acknowledgment
-
-The cBot tracks processed signals by their `_id` field to avoid re-processing. After executing a trade, it deletes the signal from Redis so the next poll returns 204 (No Content) until a new alert arrives.
+TradingView uses tickers like `NASDAQ:US100`, `FX:EURUSD`. The webhook strips the prefix (part before `:`) and uses the suffix as the cTrader symbol name.
 
 ## File Structure
 
 ```
 tradingview-ctrader-bot/
 ├── api/
-│   ├── webhook.js          # POST /api/webhook — receives TradingView alerts
-│   └── latest-signal.js    # GET/DELETE /api/latest-signal — cBot interface
-├── cbot/
-│   └── SignalBot.cs        # cBot for cTrader Automate Cloud
-├── .env.example            # Environment variables template
-├── vercel.json             # Vercel deployment config
-├── package.json            # Dependencies & scripts
-├── test-integration.mjs    # 25 integration tests
-├── test-webhook.mjs        # End-to-end webhook test
-└── README.md               # This file
+│   ├── webhook.js           # POST /api/webhook — receives TradingView alerts → calls cTrader API
+│   └── ctrader-client.js    # OAuth2 token management + market order execution
+├── .env.example             # Environment variables template
+├── vercel.json              # Vercel deployment config
+├── package.json             # Dependencies & scripts
+├── local-server.mjs         # Local validation server (no API calls)
+├── test-webhook.mjs         # Module tests
+└── README.md                # This file
 ```
 
 ## Troubleshooting
@@ -244,15 +149,13 @@ tradingview-ctrader-bot/
 | Issue | Likely Cause | Fix |
 |-------|-------------|-----|
 | Webhook returns 400 | Invalid JSON format | Check TradingView alert payload |
-| Signal stored but no trade | Symbol mapping missing | Add mapping in cBot parameters |
-| cBot not polling | Wrong Vercel URL | Check Vercel Base URL parameter |
-| "Failed to read signal" | Redis env vars not set | `vercel env add UPSTASH_REDIS_*` |
-| Position not opening | Volume below minimum | Increase notional value |
-| Duplicate trades | Signal not consumed | Check DELETE endpoint works |
+| Webhook returns 500 with auth error | Wrong credentials | Check env vars in Vercel Dashboard |
+| "cTrader API not configured" | Missing env vars | Run `vercel env add CTRADER_*` then redeploy |
+| Trade fails — symbol not found | Wrong symbol name | Check cTrader symbol names, adjust normalisation if needed |
+| Volume too small | Notional too low for symbol | Increase `notional` value in alert |
 
 ## Security Notes
 
 - The webhook is publicly accessible — anyone who knows your URL can send signals
-- For production, consider adding a shared secret (API key) validation to the webhook
-- Redis credentials are stored as Vercel environment variables (never in code)
-- The cBot runs in cTrader Cloud's sandboxed environment
+- For production, consider adding an API key validation to the webhook
+- cTrader credentials are stored as Vercel environment variables (never in code)
