@@ -34,12 +34,61 @@ TradingView Alert (JSON POST)
 
 ## Prerequisites
 
-- A [Vercel](https://vercel.com) account (free tier)
-- An [Upstash](https://console.upstash.com) Redis database (free tier — 10MB is plenty)
+- [Node.js](https://nodejs.org/) 18+ installed
 - A cTrader account on **Pipfarm** with **cTrader Automate Cloud** access
 - Your trading strategy configured in **TradingView** with webhook alerts
+- (For production) A [Vercel](https://vercel.com) account (free tier)
+- (For production) An [Upstash](https://console.upstash.com) Redis database (free tier)
 
-## Setup
+## Local Testing (No Redis Needed)
+
+You can test the full webhook flow on your own machine with zero setup:
+
+```bash
+# Start the local dev server
+cd tradingview-ctrader-bot
+node local-server.mjs
+```
+
+Output:
+```
+🌐  Server running at http://localhost:3000
+📥  POST /api/webhook         — Receive TradingView alerts
+📤  GET  /api/latest-signal    — Read latest signal
+🗑️   DELETE /api/latest-signal  — Consume (delete) signal
+```
+
+Then in another terminal:
+
+```bash
+# Test with a sample signal
+curl -X POST http://localhost:3000/api/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"Action":"DiMea Long","entry":142.5,"tp1":143.2,"tp2":143.8,"tp3":144.5,"sl":141.8,"symbol":"NASDAQ:US100","notional":150}'
+
+# Response: {"success":true,"id":"...","message":"Signal stored for NASDAQ:US100 - DiMea Long"}
+
+# Read back the signal (as the cBot does)
+curl http://localhost:3000/api/latest-signal
+
+# Consume the signal (cBot does this after executing)
+curl -X DELETE http://localhost:3000/api/latest-signal
+
+# Verify it's consumed (returns 204 No Content)
+curl -v http://localhost:3000/api/latest-signal
+```
+
+Or run the full test suite:
+
+```bash
+node test-webhook.mjs http://localhost:3000
+node test-integration.mjs
+```
+
+> **No Redis or cloud accounts needed** — the local server uses an in-memory store.
+> Everything resets when you stop the server.
+
+## Production Setup (Vercel + Upstash)
 
 ### Step 1: Deploy the Vercel Webhook
 
