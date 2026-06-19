@@ -1,8 +1,6 @@
-# TradingView → cTrader (Open API)
+# TradingView → Relay → cTrader cBot (WebSocket)
 
-Receives TradingView webhook alerts via **Vercel** and executes trades directly via the **cTrader Open API (REST)**.
-
-No cBot, no polling, no Redis — a single serverless function trades for you.
+Receives TradingView webhook alerts via **Vercel**, forwards them to a **relay server**, which broadcasts to a **cBot in cTrader Automate** via WebSocket. The cBot executes trades using cTrader's native trading API.
 
 ## Architecture
 
@@ -10,76 +8,98 @@ No cBot, no polling, no Redis — a single serverless function trades for you.
 TradingView Alert (JSON POST)
         │
         ▼
-  ┌─────────────────────────┐
-  │  Vercel Function         │  POST /api/webhook
-  │  (serverless, Node.js)   │  Validates → calls cTrader REST API
-  └────────┬────────────────┘
-           │
-           ▼
-  ┌─────────────────────────┐
-  │  cTrader Open API        │  POST /v1/positions/market
-  │  (OAuth2 password grant) │  Market order with SL + TP
-  └────────┬────────────────┘
-           │
-           ▼
-     Trade Executed!
-     ┌── SL (stop-loss)
-     └── TP1 (take-profit on the order)
+  ┌─────────────────┐       HTTP POST       ┌─────────────────┐
+  │  Vercel (free)   │ ──────────────────→  │  Relay Server    │
+  │  /api/webhook    │    /webhook           │  Railway/Render  │
+  └─────────────────┘                       │  (free tier)     │
+                                            └────────┬─────────┘
+                                                     │  WebSocket (wss://)
+                                                     ▼
+                                            ┌─────────────────┐
+                                            │  cBot in cTrader │
+                                            │  Automate Cloud  │
+                                            │                   │
+                                            │  1. Receive signal│
+                                            │  2. Check symbol  │
+                                            │  3. Market order  │
+                                            │  4. SL + TP set  │
+                                            └─────────────────┘
 ```
+
+**Why this works:**
+- **Vercel** receives TradingView alerts (serverless, free tier)
+- **Relay server** stays online 24/7 (Railway free tier, ~$0/month)
+- **cBot** connects via WebSocket (no `FullAccess` HTTP rights needed in cloud)
+- cBot uses cTrader's **native C# trading API** (Symbol, Position, ExecuteMarketOrder)
 
 ## Prerequisites
 
-- A cTrader account (Pipfarm or any broker using cTrader)
+- A cTrader account (Pipfarm or any broker running cTrader)
+- A [Vercel](https://vercel.com) account (free tier)
+- A [Railway](https://railway.app) or [Render](https://render.com) account (free tier)
 - [Node.js](https://nodejs.org/) 18+ for local testing
-- A [Vercel](https://vercel.com) account (free tier) for deployment
 
 ## Setup
 
-### 1. Register a cTrader API Application
-
-1. Go to [https://idp.ctrader.com/](https://idp.ctrader.com/)
-2. Click **Register** → create an app (use any name, e.g. `TradingView Bot`)
-3. Note your **Client ID** and **Client Secret**
-
-### 2. Find Your Account ID
-
-1. Open cTrader desktop/mobile app
-2. Go to your account details
-3. Note the numeric **Account ID** (e.g. `11223344`)
-
-### 3. Deploy to Vercel
+### Step 1: Deploy the Relay Server to Railway
 
 ```bash
-# Install Vercel CLI & log in
+# In your project directory
+cd tradingview-ctrader-bot
+
+# Install Railway CLI
+npm install -g @railway/cli
+railway login
+
+# Deploy
+railway init
+railway up
+```
+
+Railway will detect `package.json` and run `node relay-server.mjs` automatically.
+Note your Railway URL: `https://your-relay.up.railway.app`
+
+> **Or deploy to Render:** Create a new Web Service, set build command to `npm install` and start command to `node relay-server.mjs`.
+
+### Step 2: Deploy the Webhook to Vercel
+
+```bash
+# Install Vercel CLI
 npm install -g vercel
 vercel login
 
 # Deploy
 cd tradingview-ctrader-bot
 vercel
+
+# Set the relay URL so Vercel knows where to forward signals
+vercel env add RELAY_URL
+# Paste: https://your-relay.up.railway.app
+
+vercel --prod
 ```
 
-When prompted, link the project (follow the prompts — Vercel will auto-detect the config).
+Your webhook URL: `https://your-project.vercel.app/api/webhook`
 
-### 4. Set Environment Variables
+### Step 3: Deploy the cBot in cTrader Automate
 
-```bash
-vercel env add CTRADER_CLIENT_ID
-vercel env add CTRADER_CLIENT_SECRET
-vercel env add CTRADER_EMAIL
-vercel env add CTRADER_PASSWORD
-vercel env add CTRADER_ACCOUNT_ID
+1. Open **cTrader** → **Automate** → **cBot** tab
+2. Click **New cBot** → paste code from `cbot/SignalBot.cs` → **Save** (name: `SignalBot`)
+3. In **cTrader Automate Cloud** → **Deploy Bot** → select **SignalBot**
+4. Set the **Relay Server URL** parameter to your Railway URL:
+   ```
+   wss://your-relay.up.railway.app
+   ```
 
-vercel --prod  # Redeploy with secrets
+### Step 4: Configure TradingView Alert
+
+Create an alert with the **Webhook URL** set to your Vercel endpoint:
+
+```
+https://your-project.vercel.app/api/webhook
 ```
 
-Or set them in the Vercel Dashboard → Project → Settings → Environment Variables.
-
-Your webhook URL will be: `https://your-project.vercel.app/api/webhook`
-
-### 5. Configure TradingView Alert
-
-Create an alert with the **Webhook URL** set to your Vercel endpoint and the JSON message:
+Alert message (JSON):
 
 ```pinescript
 alert('{"Action":"DiMea Long","entry":' + str.tostring(entryPrice) + ',"tp1":' + str.tostring(tp1Price) + ',"sl":' + str.tostring(hardSL) + ',"symbol":"' + syminfo.tickerid + '","notional":150}', freq=alert.freq_once_per_bar_close)
@@ -96,50 +116,68 @@ alert('{"Action":"DiMea Long","entry":' + str.tostring(entryPrice) + ',"tp1":' +
 | `symbol` | string | `"NASDAQ:US100"` | TradingView ticker ID |
 | `notional` | number | `150` | Trade value in USD |
 
-> **Note:** Symbol is auto-normalised — `NASDAQ:US100` → `US100`, `FX:EURUSD` → `EURUSD`, etc. Part after the last colon is used as the cTrader symbol name.
+> **Symbol:** Auto-normalised — `NASDAQ:US100` → `US100`, `FX:EURUSD` → `EURUSD`, etc.
 
-## Local Testing (Validation Only)
+## Local Testing
 
-The local server tests **parsing and validation only** — it never calls the cTrader API:
-
-```bash
-node local-server.mjs
-# Open http://localhost:3000/api/test
-```
-
-Or run the module tests:
+Test the validation logic locally (no relay needed):
 
 ```bash
 node test-webhook.mjs
 ```
 
+Test the webhook against your deployed Vercel endpoint:
+
+```bash
+curl -X POST https://your-project.vercel.app/api/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"Action":"DiMea Long","symbol":"NASDAQ:US100","entry":142.5,"tp1":143.2,"sl":141.8,"notional":150}'
+```
+
+Test the relay server locally:
+
+```bash
+# Terminal 1: start the relay
+npm run relay
+
+# Terminal 2: send a test signal
+curl -X POST http://localhost:8080/webhook \
+  -H "Content-Type: application/json" \
+  -d '{"Action":"DiMea Long","symbol":"US100","entry":142.5,"tp1":143.2,"sl":141.8,"notional":150}'
+```
+
 ## How It Works
 
-1. **TradingView** sends a JSON `POST` to `/api/webhook`
-2. **Vercel function** validates all required fields
-3. Gets an **OAuth2 access token** from `idp.ctrader.com` (password grant)
-4. Sends a **market order** via `POST /v1/positions/market` with SL + TP
-5. Returns trade result as JSON
+### Flow
 
-### Volume Calculation
+1. **TradingView** sends a JSON POST to Vercel `/api/webhook`
+2. **Vercel** validates the signal and forwards it to the relay server via HTTP
+3. **Relay server** broadcasts the signal to all connected cBots via WebSocket
+4. **cBot** receives the signal, resolves the symbol, checks for existing positions
+5. **cBot** places a market order with SL and TP1 using cTrader's native API
+6. Trade is executed!
 
-Volume is calculated as `round(notional / entry)` — e.g. $150 notional / $142.50 entry = 1 unit.
+### cBot Details
 
-### Symbol Normalisation
-
-TradingView uses tickers like `NASDAQ:US100`, `FX:EURUSD`. The webhook strips the prefix (part before `:`) and uses the suffix as the cTrader symbol name.
+- Connects to the relay server on startup via `ClientWebSocket`
+- Auto-reconnects on disconnect (configurable delay)
+- Processes one signal per tick (deduplicated by checking existing positions)
+- Symbol resolution: strips TradingView prefix (e.g. `NASDAQ:US100` → `US100`)
 
 ## File Structure
 
 ```
 tradingview-ctrader-bot/
 ├── api/
-│   ├── webhook.js           # POST /api/webhook — receives TradingView alerts → calls cTrader API
-│   └── ctrader-client.js    # OAuth2 token management + market order execution
+│   ├── webhook.js           # POST /api/webhook — validates & forwards to relay
+│   └── ctrader-client.js    # cTrader Open API reference (not used in main flow)
+├── cbot/
+│   └── SignalBot.cs         # cBot for cTrader Automate (WebSocket client)
+├── relay-server.mjs         # HTTP + WebSocket relay server (deploy on Railway)
 ├── .env.example             # Environment variables template
 ├── vercel.json              # Vercel deployment config
 ├── package.json             # Dependencies & scripts
-├── local-server.mjs         # Local validation server (no API calls)
+├── local-server.mjs         # Local validation server
 ├── test-webhook.mjs         # Module tests
 └── README.md                # This file
 ```
@@ -147,15 +185,16 @@ tradingview-ctrader-bot/
 ## Troubleshooting
 
 | Issue | Likely Cause | Fix |
-|-------|-------------|-----|
-| Webhook returns 400 | Invalid JSON format | Check TradingView alert payload |
-| Webhook returns 500 with auth error | Wrong credentials | Check env vars in Vercel Dashboard |
-| "cTrader API not configured" | Missing env vars | Run `vercel env add CTRADER_*` then redeploy |
-| Trade fails — symbol not found | Wrong symbol name | Check cTrader symbol names, adjust normalisation if needed |
-| Volume too small | Notional too low for symbol | Increase `notional` value in alert |
+|-------|-------------|------|
+| Webhook returns 502 | Relay server down | Check Railway dashboard, restart relay |
+| cBot not connecting | Wrong WebSocket URL | Ensure Relay URL starts with `wss://` in cBot params |
+| "Symbol not found" | Wrong cTrader symbol name | Check the symbol name in cTrader, adjust if needed |
+| Trade not opening | Volume below minimum | Increase `notional` value in alert |
+| cBot reconnecting loop | Relay unreachable from cloud | Check firewall settings, try `wss://` |
+| Webhook returns 400 | Invalid JSON | Check TradingView alert message format |
 
 ## Security Notes
 
-- The webhook is publicly accessible — anyone who knows your URL can send signals
-- For production, consider adding an API key validation to the webhook
-- cTrader credentials are stored as Vercel environment variables (never in code)
+- The webhook is publicly accessible — consider adding an API key header check
+- The relay server has no authentication — deploy with Railway's private networking if needed
+- cTrader credentials are never stored in code

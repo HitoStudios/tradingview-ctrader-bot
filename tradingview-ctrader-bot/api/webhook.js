@@ -1,8 +1,18 @@
-import { isConfigured } from './ctrader-client.js';
+/**
+ * TradingView webhook → Relay Server → cBot
+ *
+ * Validates TradingView alerts and forwards them to the relay server,
+ * which broadcasts to connected cBots via WebSocket.
+ *
+ * Environment variable:
+ *   RELAY_URL  — URL of the relay server (e.g. https://relay.up.railway.app)
+ *
+ * TradingView alert JSON format:
+ *   { "Action": "DiMea Long", "entry": 142.5, "tp1": 143.2,
+ *     "sl": 141.8, "symbol": "NASDAQ:US100", "notional": 150 }
+ */
 
-export const config = {
-  runtime: 'nodejs',
-};
+const RELAY_URL = process.env.RELAY_URL;
 
 /**
  * Normalise a TradingView symbol to cTrader format.
@@ -19,7 +29,6 @@ export default async function handler(req, res) {
   console.log(`[${reqTime}] ${req.method} ${req.url}`);
 
   if (req.method !== 'POST') {
-    console.log(`[${reqTime}] Rejected: method ${req.method} not allowed`);
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
@@ -44,23 +53,37 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'notional must be a positive number', received: signal.notional });
     }
 
-    // ── Construct response ──
     const ctSymbol = normaliseSymbol(signal.symbol);
     const isLong = signal.Action.endsWith(' Long');
     const volume = Math.round((signal.notional / signal.entry) * 100) / 100;
 
-    console.log(`[${reqTime}] Signal validated OK: ${signal.Action} ${ctSymbol} entry=${signal.entry} sl=${signal.sl} tp=${signal.tp1} vol=${volume}`);
+    console.log(`[${reqTime}] Signal OK: ${signal.Action} ${ctSymbol} entry=${signal.entry} sl=${signal.sl} tp=${signal.tp1} vol=${volume}`);
 
-    // ── cTrader DOES NOT have a REST trading API ──
-    // The Open API uses WebSocket + Protobuf messages.
-    // See README.md for the two working approaches:
-    //   A) cBot in cTrader Automate (recommended)
-    //   B) Persistent WebSocket relay server
+    // ── Forward to relay server ──
+    if (RELAY_URL) {
+      try {
+        const relayRes = await fetch(`${RELAY_URL}/webhook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(signal),
+        });
+        const relayBody = await relayRes.text();
+        console.log(`[${reqTime}] Relay responded ${relayRes.status}: ${relayBody}`);
+      } catch (err) {
+        console.error(`[${reqTime}] Relay forward failed:`, err.message);
+        return res.status(502).json({
+          error: 'Relay unreachable',
+          detail: err.message,
+          hint: `Ensure RELAY_URL is set correctly (current: ${RELAY_URL}) and the relay server is running.`,
+        });
+      }
+    } else {
+      console.log(`[${reqTime}] RELAY_URL not set — signal validated but not forwarded`);
+    }
+
     return res.status(200).json({
       success: true,
-      message: 'Signal received and validated. cTrader Open API is WebSocket-based — ' +
-        'to execute this trade, deploy a cBot (Option A) or a relay server (Option B). ' +
-        'See README.md for details.',
+      message: 'Signal forwarded to cBot relay',
       signal: {
         action: signal.Action,
         symbol: ctSymbol,
@@ -71,7 +94,7 @@ export default async function handler(req, res) {
         takeProfit: signal.tp1,
         notional: signal.notional,
       },
-      configOk: isConfigured(),
+      relayUrl: RELAY_URL || null,
       timestamp: reqTime,
     });
   } catch (error) {

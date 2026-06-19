@@ -1,8 +1,9 @@
 using System;
-using System.Collections.Generic;
-using System.Net.Http.Headers;
+using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using cAlgo.API;
 using cAlgo.API.Internals;
@@ -14,84 +15,185 @@ namespace cAlgo.Robots
     {
         // ─── Parameters ───
 
-        [Parameter("Vercel Base URL", Group = "Webhook", DefaultValue = "https://your-project.vercel.app")]
-        public string VercelBaseUrl { get; set; }
+        [Parameter("Relay Server URL", Group = "Connection",
+            DefaultValue = "wss://your-relay.up.railway.app")]
+        public string RelayUrl { get; set; }
 
-        [Parameter("Polling Interval (sec)", Group = "Webhook", DefaultValue = 10, MinValue = 5, MaxValue = 60)]
-        public int PollingIntervalSeconds { get; set; } = 10;
-
-        [Parameter("Default Notional ($)", Group = "Risk", DefaultValue = 150, MinValue = 1)]
+        [Parameter("Default Notional ($)", Group = "Risk",
+            DefaultValue = 150, MinValue = 1)]
         public double DefaultNotional { get; set; } = 150;
 
-        [Parameter("Symbol Mappings", Group = "Symbols", DefaultValue = "NASDAQ:US100:US100")]
-        public string SymbolMappingsRaw { get; set; }
-
-        [Parameter("TP1 Fraction", Group = "Take Profits", DefaultValue = 0.34, MinValue = 0.01, MaxValue = 1.0)]
-        public double Tp1Fraction { get; set; } = 0.34;
-
-        [Parameter("TP2 Fraction", Group = "Take Profits", DefaultValue = 0.33, MinValue = 0.0, MaxValue = 1.0)]
-        public double Tp2Fraction { get; set; } = 0.33;
-
-        [Parameter("TP3 Fraction", Group = "Take Profits", DefaultValue = 0.33, MinValue = 0.0, MaxValue = 1.0)]
-        public double Tp3Fraction { get; set; } = 0.33;
+        [Parameter("Reconnect Delay (sec)", Group = "Connection",
+            DefaultValue = 10, MinValue = 5, MaxValue = 60)]
+        public int ReconnectDelaySec { get; set; } = 10;
 
         // ─── State ───
-        private System.Net.Http.HttpClient _httpClient;
-        private DateTime _lastPollTime = DateTime.MinValue;
-        private string _lastProcessedSignalId = "";
-
-        private const string SignalPath = "/api/latest-signal";
+        private ClientWebSocket _ws;
+        private CancellationTokenSource _cts;
+        private TradingViewSignal _pendingSignal;
+        private readonly object _signalLock = new();
 
         // ─── Lifecycle ───
 
         protected override void OnStart()
         {
-            Print("SignalBot starting...");
+            Print($"SignalBot v3 starting");
+            Print($"Relay: {RelayUrl}");
+            Print($"Notional: ${DefaultNotional}");
 
-            _httpClient = new System.Net.Http.HttpClient();
-            _httpClient.Timeout = TimeSpan.FromSeconds(10);
-            _httpClient.DefaultRequestHeaders.Accept.Add(
-                new MediaTypeWithQualityHeaderValue("application/json"));
-
-            VercelBaseUrl = VercelBaseUrl.TrimEnd('/');
-            Print($"Polling {VercelBaseUrl}{SignalPath} every {PollingIntervalSeconds}s");
+            _cts = new CancellationTokenSource();
+            _ = RunWebSocketLoopAsync(_cts.Token);
         }
 
         protected override void OnTick()
         {
-            var elapsed = (DateTime.UtcNow - _lastPollTime).TotalSeconds;
-            if (elapsed >= PollingIntervalSeconds)
+            TradingViewSignal signal = null;
+
+            lock (_signalLock)
             {
-                _lastPollTime = DateTime.UtcNow;
-                _ = PollAndProcessAsync();
+                if (_pendingSignal != null)
+                {
+                    signal = _pendingSignal;
+                    _pendingSignal = null;
+                }
+            }
+
+            if (signal != null)
+            {
+                ProcessSignal(signal);
             }
         }
 
         protected override void OnStop()
         {
             Print("SignalBot stopping...");
-            _httpClient?.Dispose();
+            _cts?.Cancel();
+            _ws?.Dispose();
         }
 
-        // ─── Core ───
+        // ─── WebSocket Loop (background) ───
 
-        private async Task PollAndProcessAsync()
+        private async Task RunWebSocketLoopAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    _ws?.Dispose();
+                    _ws = new ClientWebSocket();
+
+                    var uri = RelayUrl;
+                    if (!uri.StartsWith("ws://") && !uri.StartsWith("wss://"))
+                        uri = $"wss://{uri}";
+
+                    Print($"Connecting to {uri}...");
+                    await _ws.ConnectAsync(new Uri(uri), ct);
+                    Print("✅ WebSocket connected!");
+
+                    var buffer = new byte[1024 * 64];
+
+                    while (_ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
+                    {
+                        var result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            Print("Server closed connection");
+                            break;
+                        }
+
+                        if (result.MessageType == WebSocketMessageType.Text)
+                        {
+                            // Handle multi-frame messages
+                            var sb = new StringBuilder();
+                            sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+
+                            while (!result.EndOfMessage)
+                            {
+                                result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                                sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                            }
+
+                            OnMessage(sb.ToString());
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Print($"WebSocket error: {ex.Message}");
+                }
+
+                if (!ct.IsCancellationRequested)
+                {
+                    Print($"Reconnecting in {ReconnectDelaySec}s...");
+                    await Task.Delay(ReconnectDelaySec * 1000, ct);
+                }
+            }
+        }
+
+        // ─── Message Handler ───
+
+        private void OnMessage(string json)
         {
             try
             {
-                var signal = await FetchSignalAsync();
-                if (signal == null || signal.Id == _lastProcessedSignalId)
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("type", out var typeProp))
                     return;
 
-                Print($"Signal: {signal.Action} | {signal.Symbol} | Entry={signal.Entry}");
+                var type = typeProp.GetString();
 
+                if (type == "welcome")
+                {
+                    Print("Connected to relay server");
+                    return;
+                }
+
+                if (type == "signal" && root.TryGetProperty("data", out var data))
+                {
+                    var signal = JsonSerializer.Deserialize<TradingViewSignal>(
+                        data.GetRawText(),
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                    if (signal == null)
+                    {
+                        Print("Failed to parse signal");
+                        return;
+                    }
+
+                    lock (_signalLock)
+                    {
+                        _pendingSignal = signal;
+                    }
+
+                    Print($"📩 Signal: {signal.Action} {signal.Symbol} @ {signal.Entry}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Print($"Parse error: {ex.Message}");
+            }
+        }
+
+        // ─── Trade Execution ───
+
+        private void ProcessSignal(TradingViewSignal signal)
+        {
+            try
+            {
                 var ctSymbol = ResolveSymbol(signal.Symbol);
-                if (ctSymbol == null) { await ConsumeAsync(); return; }
+                if (ctSymbol == null)
+                    return;
 
                 if (HasOpenPosition(ctSymbol))
                 {
                     Print($"Position exists for {ctSymbol} — skipping");
-                    await ConsumeAsync();
                     return;
                 }
 
@@ -99,95 +201,43 @@ namespace cAlgo.Robots
                 if (symbol == null)
                 {
                     Print($"Symbol '{ctSymbol}' not found in account");
-                    await ConsumeAsync();
                     return;
                 }
 
                 bool isLong = signal.Action.EndsWith(" Long", StringComparison.OrdinalIgnoreCase);
-
                 if (!isLong && !signal.Action.EndsWith(" Short", StringComparison.OrdinalIgnoreCase))
                 {
                     Print($"Cannot parse direction from '{signal.Action}'");
-                    await ConsumeAsync();
                     return;
                 }
 
                 var tradeType = isLong ? TradeType.Buy : TradeType.Sell;
                 double notional = signal.Notional > 0 ? signal.Notional : DefaultNotional;
                 double midPrice = (symbol.Ask + symbol.Bid) / 2.0;
-                long volume = NormVolume(symbol, (long)(notional / midPrice));
+                long volume = NormVolume(symbol, (long)Math.Round(notional / midPrice));
+
                 if (volume <= 0)
                 {
                     Print($"Invalid volume {volume}");
-                    await ConsumeAsync();
                     return;
                 }
 
-                // Place market order (SL and TP1 are set on the order)
-                Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP1={signal.Tp1}");
+                Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP={signal.Tp1}");
+
                 var tradeOp = ExecuteMarketOrder(
                     tradeType, symbol.Name, volume, "TradingView", signal.Sl, signal.Tp1);
 
                 if (tradeOp == null || tradeOp.Error != null)
                 {
-                    Print($"Market order failed: {tradeOp?.Error}");
-                    await ConsumeAsync();
+                    Print($"❌ Trade failed: {tradeOp?.Error}");
                     return;
                 }
 
-                // Find the opened position
-                Position pos = FindPosition(symbol.Name, "TradingView");
-                if (pos == null)
-                {
-                    Print("Market order succeeded but position not found");
-                    await ConsumeAsync();
-                    return;
-                }
-
-                Print($"Position opened: ID={pos.Id} Price={pos.EntryPrice} Vol={pos.Volume}");
-
-                _lastProcessedSignalId = signal.Id;
-                await ConsumeAsync();
-                Print($"Done — {signal.Action} on {symbol.Name}");
+                Print($"✅ Trade executed! ID={tradeOp.Position?.Id} Price={tradeOp.Position?.EntryPrice}");
             }
             catch (Exception ex)
             {
-                Print($"Error: {ex.Message}");
-            }
-        }
-
-        // ─── HTTP ───
-
-        private async Task<TradingViewSignal> FetchSignalAsync()
-        {
-            try
-            {
-                var res = await _httpClient.GetAsync($"{VercelBaseUrl}{SignalPath}");
-                if (res.StatusCode == System.Net.HttpStatusCode.NoContent) return null;
-                res.EnsureSuccessStatusCode();
-                var json = await res.Content.ReadAsStringAsync();
-                return string.IsNullOrWhiteSpace(json)
-                    ? null
-                    : JsonSerializer.Deserialize<TradingViewSignal>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            }
-            catch (Exception ex)
-            {
-                Print($"HTTP error: {ex.Message}");
-                return null;
-            }
-        }
-
-        private async Task ConsumeAsync()
-        {
-            try
-            {
-                var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Delete, $"{VercelBaseUrl}{SignalPath}");
-                var res = await _httpClient.SendAsync(req);
-                Print($"Signal consumed ({res.StatusCode})");
-            }
-            catch (Exception ex)
-            {
-                Print($"Consume error: {ex.Message}");
+                Print($"ProcessSignal error: {ex.Message}");
             }
         }
 
@@ -201,41 +251,17 @@ namespace cAlgo.Robots
             return false;
         }
 
-        private Position FindPosition(string symbolName, string label)
-        {
-            foreach (var p in Positions)
-                if (string.Equals(p.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(p.Label, label, StringComparison.OrdinalIgnoreCase))
-                    return p;
-            return null;
-        }
-
         private string ResolveSymbol(string tvSymbol)
         {
-            if (Symbols.GetSymbol(tvSymbol) != null) return tvSymbol;
+            if (Symbols.GetSymbol(tvSymbol) != null)
+                return tvSymbol;
 
-            // Check from mappings
             var parts = tvSymbol.Split(':');
             if (parts.Length > 1)
             {
                 string suffix = parts[parts.Length - 1];
-                if (Symbols.GetSymbol(suffix) != null) return suffix;
-            }
-
-            // If mappings param was filled, split and check
-            if (!string.IsNullOrWhiteSpace(SymbolMappingsRaw))
-            {
-                foreach (var entry in SymbolMappingsRaw.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    var mapParts = entry.Split(':');
-                    if (mapParts.Length >= 2)
-                    {
-                        var from = string.Join(":", mapParts, 0, mapParts.Length - 1).Trim();
-                        var to = mapParts[mapParts.Length - 1].Trim();
-                        if (string.Equals(from, tvSymbol, StringComparison.OrdinalIgnoreCase))
-                            return to;
-                    }
-                }
+                if (Symbols.GetSymbol(suffix) != null)
+                    return suffix;
             }
 
             Print($"Unmapped symbol '{tvSymbol}'");
@@ -257,26 +283,18 @@ namespace cAlgo.Robots
 
         private class TradingViewSignal
         {
-            [JsonPropertyName("_id")]
-            public string Id { get; set; }
             [JsonPropertyName("Action")]
             public string Action { get; set; }
             [JsonPropertyName("entry")]
             public double Entry { get; set; }
             [JsonPropertyName("tp1")]
             public double Tp1 { get; set; }
-            [JsonPropertyName("tp2")]
-            public double Tp2 { get; set; }
-            [JsonPropertyName("tp3")]
-            public double Tp3 { get; set; }
             [JsonPropertyName("sl")]
             public double Sl { get; set; }
             [JsonPropertyName("symbol")]
             public string Symbol { get; set; }
             [JsonPropertyName("notional")]
             public double Notional { get; set; }
-            [JsonPropertyName("_receivedAt")]
-            public string ReceivedAt { get; set; }
         }
     }
 }
