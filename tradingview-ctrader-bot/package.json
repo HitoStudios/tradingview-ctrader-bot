@@ -1,0 +1,20 @@
+{
+  "name": "tradingview-ctrader-bot",
+  "version": "1.0.0",
+  "description": "TradingView webhook receiver -> Upstash Redis -> cTrader cBot",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "test:webhook": "node test-webhook.mjs"
+  },
+  "keywords": ["tradingview", "ctrader", "trading", "bot"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@upstash/redis": "^1.38.0"
+  },
+  "devDependencies": {
+    "vercel": "^34.0.0"
+  }
+}

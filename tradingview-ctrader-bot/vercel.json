@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/*.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    { "src": "/api/webhook", "dest": "/api/webhook.js" },
+    { "src": "/api/latest-signal", "dest": "/api/latest-signal.js" }
+  ]
+}
