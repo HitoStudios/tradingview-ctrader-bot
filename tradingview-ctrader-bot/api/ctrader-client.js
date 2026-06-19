@@ -41,10 +41,17 @@ export function isConfigured() {
  * Obtain (or return cached) access token via OAuth2 password grant.
  */
 async function getAccessToken() {
+  const ts = () => new Date().toISOString();
+
   // Return cached token if still valid (with 5 min buffer)
   if (_cachedToken && Date.now() < _tokenExpiry - 300_000) {
+    console.log(`[${ts()}] Using cached token (expires in ${Math.round((_tokenExpiry - Date.now()) / 1000)}s)`);
     return _cachedToken;
   }
+
+  const idpUrl = `${IDP_URL}/connect/token`;
+  console.log(`[${ts()}] Requesting new token from ${idpUrl}`);
+  console.log(`[${ts()}] client_id=${process.env.CTRADER_CLIENT_ID?.slice(0, 8)}... email=${process.env.CTRADER_EMAIL}`);
 
   const body = new URLSearchParams({
     grant_type: 'password',
@@ -55,7 +62,7 @@ async function getAccessToken() {
     scope: 'openapi',
   });
 
-  const res = await fetch(`${IDP_URL}/connect/token`, {
+  const res = await fetch(idpUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -63,12 +70,14 @@ async function getAccessToken() {
 
   if (!res.ok) {
     const text = await res.text();
+    console.error(`[${ts()}] cTrader auth failed (${res.status}): ${text}`);
     throw new Error(`cTrader auth failed (${res.status}): ${text}`);
   }
 
   const data = await res.json();
   _cachedToken = data.access_token;
   _tokenExpiry = Date.now() + data.expires_in * 1000;
+  console.log(`[${ts()}] Token obtained, expires in ${data.expires_in}s`);
 
   return _cachedToken;
 }
@@ -102,6 +111,9 @@ function normaliseSymbol(tvSymbol) {
  * @returns {Promise<object>} Result from cTrader API
  */
 export async function executeMarketOrder(signal) {
+  const ts = () => new Date().toISOString();
+
+  console.log(`[${ts()}] executeMarketOrder: checking config...`);
   if (!isConfigured()) {
     throw new Error(
       'cTrader API not configured. Set CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, ' +
@@ -109,9 +121,13 @@ export async function executeMarketOrder(signal) {
     );
   }
 
+  console.log(`[${ts()}] executeMarketOrder: getting access token...`);
   const token = await getAccessToken();
+  console.log(`[${ts()}] executeMarketOrder: token obtained (${token.slice(0, 10)}...)`);
+
   const isLong = signal.Action.endsWith(' Long');
   const symbolName = normaliseSymbol(signal.symbol);
+  console.log(`[${ts()}] executeMarketOrder: symbol="${symbolName}" isLong=${isLong}`);
 
   if (!symbolName) {
     throw new Error(`Cannot parse symbol from "${signal.symbol}"`);
@@ -142,9 +158,12 @@ export async function executeMarketOrder(signal) {
     RequestId: requestId,
   };
 
-  console.log('cTrader market order payload:', JSON.stringify(payload));
+  console.log(`[${ts()}] cTrader payload:`, JSON.stringify(payload));
 
-  const res = await fetch(`${API_URL}/v1/positions/market`, {
+  const url = `${API_URL}/v1/positions/market`;
+  console.log(`[${ts()}] Sending POST to ${url}...`);
+
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -154,6 +173,7 @@ export async function executeMarketOrder(signal) {
   });
 
   const body = await res.text();
+  console.log(`[${ts()}] cTrader response status=${res.status} body=${body.slice(0, 500)}`);
 
   if (!res.ok) {
     throw new Error(`cTrader API error (${res.status}): ${body}`);
@@ -161,6 +181,8 @@ export async function executeMarketOrder(signal) {
 
   let parsed;
   try { parsed = JSON.parse(body); } catch { parsed = body; }
+
+  console.log(`[${ts()}] Trade placed successfully`);
 
   return {
     success: true,
