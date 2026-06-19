@@ -1,13 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using cAlgo.API;
-using cAlgo.API.Collections;
-using cAlgo.API.Indicators;
 using cAlgo.API.Internals;
 
 namespace cAlgo.Robots
@@ -15,7 +12,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.FullAccess)]
     public class SignalBot : Robot
     {
-        // ─── Parameters (set in cTrader cBot UI) ───
+        // ─── Parameters ───
 
         [Parameter("Vercel Base URL", Group = "Webhook", DefaultValue = "https://your-project.vercel.app")]
         public string VercelBaseUrl { get; set; }
@@ -39,10 +36,9 @@ namespace cAlgo.Robots
         public double Tp3Fraction { get; set; } = 0.33;
 
         // ─── State ───
-        private HttpClient _httpClient;
+        private System.Net.Http.HttpClient _httpClient;
         private DateTime _lastPollTime = DateTime.MinValue;
         private string _lastProcessedSignalId = "";
-        private Dictionary<string, string> _symbolMappings;
 
         private const string SignalPath = "/api/latest-signal";
 
@@ -52,29 +48,13 @@ namespace cAlgo.Robots
         {
             Print("SignalBot starting...");
 
-            _symbolMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (!string.IsNullOrWhiteSpace(SymbolMappingsRaw))
-            {
-                foreach (var entry in SymbolMappingsRaw.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    var parts = entry.Split(':');
-                    if (parts.Length >= 2)
-                    {
-                        var tvSymbol = string.Join(":", parts, 0, parts.Length - 1).Trim();
-                        var ctSymbol = parts[parts.Length - 1].Trim();
-                        _symbolMappings[tvSymbol] = ctSymbol;
-                        Print($"  Mapped: {tvSymbol} -> {ctSymbol}");
-                    }
-                }
-            }
-
-            _httpClient = new HttpClient();
+            _httpClient = new System.Net.Http.HttpClient();
             _httpClient.Timeout = TimeSpan.FromSeconds(10);
             _httpClient.DefaultRequestHeaders.Accept.Add(
                 new MediaTypeWithQualityHeaderValue("application/json"));
 
             VercelBaseUrl = VercelBaseUrl.TrimEnd('/');
-            Print($"Polling {VercelBaseUrl}/api/latest-signal every {PollingIntervalSeconds}s");
+            Print($"Polling {VercelBaseUrl}{SignalPath} every {PollingIntervalSeconds}s");
         }
 
         protected override void OnTick()
@@ -108,7 +88,7 @@ namespace cAlgo.Robots
                 var ctSymbol = ResolveSymbol(signal.Symbol);
                 if (ctSymbol == null) { await ConsumeAsync(); return; }
 
-                if (HasPosition(ctSymbol))
+                if (HasOpenPosition(ctSymbol))
                 {
                     Print($"Position exists for {ctSymbol} — skipping");
                     await ConsumeAsync();
@@ -124,9 +104,8 @@ namespace cAlgo.Robots
                 }
 
                 bool isLong = signal.Action.EndsWith(" Long", StringComparison.OrdinalIgnoreCase);
-                bool isShort = signal.Action.EndsWith(" Short", StringComparison.OrdinalIgnoreCase);
 
-                if (!isLong && !isShort)
+                if (!isLong && !signal.Action.EndsWith(" Short", StringComparison.OrdinalIgnoreCase))
                 {
                     Print($"Cannot parse direction from '{signal.Action}'");
                     await ConsumeAsync();
@@ -134,7 +113,8 @@ namespace cAlgo.Robots
                 }
 
                 var tradeType = isLong ? TradeType.Buy : TradeType.Sell;
-                long volume = CalcVolume(symbol, signal.Notional > 0 ? signal.Notional : DefaultNotional);
+                double notional = signal.Notional > 0 ? signal.Notional : DefaultNotional;
+                long volume = NormVolume(symbol, (long)(notional / ((symbol.Ask + symbol.Bid) / 2.0)));
                 if (volume <= 0)
                 {
                     Print($"Invalid volume {volume}");
@@ -142,51 +122,54 @@ namespace cAlgo.Robots
                     return;
                 }
 
-                volume = NormVolume(symbol, volume);
-
-                // Place market order with SL + TP1 on the position
+                // Place market order
                 Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP1={signal.Tp1}");
-                var tradeOp = ExecuteMarketOrderAsync(
+                var tradeOp = ExecuteMarketOrder(
                     tradeType, symbol.Name, volume, "TradingView", signal.Sl, signal.Tp1);
 
-                if (tradeOp.Status != TradeOperationStatus.Succeeded || 
-                    tradeOp.Result == null || tradeOp.Result.Positions.Count == 0)
+                if (tradeOp == null || !string.IsNullOrEmpty(tradeOp.Error))
                 {
-                    Print($"Market order failed (Status={tradeOp.Status})");
+                    Print($"Market order failed: {tradeOp?.Error ?? "null"}");
                     await ConsumeAsync();
                     return;
                 }
 
-                var pos = tradeOp.Result.Positions[0];
+                // Find the opened position
+                Position pos = FindPosition(symbol.Name, "TradingView");
+                if (pos == null)
+                {
+                    Print("Market order succeeded but position not found");
+                    await ConsumeAsync();
+                    return;
+                }
+
                 Print($"Position opened: ID={pos.Id} Price={pos.EntryPrice} Vol={pos.Volume}");
 
-                // Place TP2 and TP3 as separate pending limit orders (partial closes)
+                // Place TP2 and TP3 as separate pending limit orders
                 var fractions = new[] { Tp1Fraction, Tp2Fraction, Tp3Fraction };
                 var tpPrices = new[] { signal.Tp1, signal.Tp2, signal.Tp3 };
                 var tpLabels = new[] { "TP1", "TP2", "TP3" };
                 var opposite = tradeType == TradeType.Buy ? TradeType.Sell : TradeType.Buy;
 
-                for (int i = 1; i < 3; i++) // TP2 and TP3 as pending limit orders
+                for (int i = 1; i < 3; i++)
                 {
                     if (tpPrices[i] <= 0 || fractions[i] <= 0) continue;
 
-                    long tpVol = NormVolume(symbol, (long)(volume * fractions[i]));
+                    long tpVol = NormVolume(symbol, (long)((double)volume * fractions[i]));
                     if (tpVol < symbol.VolumeInUnitsMin)
                     {
                         Print($"  {tpLabels[i]} vol {tpVol} < min — skipping");
                         continue;
                     }
 
-                    var limitOp = ExecuteLimitOrderAsync(
+                    var limitOp = ExecuteLimitOrder(
                         opposite, symbol.Name, tpVol, tpPrices[i],
-                        tpLabels[i] + "_" + pos.Id,
-                        null, null, null, null, null, null);
+                        tpLabels[i] + "_" + pos.Id, null, null, null, null, null, null);
 
-                    if (limitOp.Status == TradeOperationStatus.Succeeded && 
-                        limitOp.Result != null && limitOp.Result.Orders.Count > 0)
+                    if (limitOp != null && string.IsNullOrEmpty(limitOp.Error))
                         Print($"  {tpLabels[i]} limit order at {tpPrices[i]} for {tpVol}");
                     else
-                        Print($"  {tpLabels[i]} limit order failed at {tpPrices[i]} (Status={limitOp.Status})");
+                        Print($"  {tpLabels[i]} limit order failed: {limitOp?.Error ?? "null"}");
                 }
 
                 _lastProcessedSignalId = signal.Id;
@@ -224,7 +207,7 @@ namespace cAlgo.Robots
         {
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Delete, $"{VercelBaseUrl}{SignalPath}");
+                var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Delete, $"{VercelBaseUrl}{SignalPath}");
                 var res = await _httpClient.SendAsync(req);
                 Print($"Signal consumed ({res.StatusCode})");
             }
@@ -236,35 +219,53 @@ namespace cAlgo.Robots
 
         // ─── Helpers ───
 
-        private bool HasPosition(string symbol)
+        private bool HasOpenPosition(string symbolName)
         {
             foreach (var p in Positions)
-                if (string.Equals(p.SymbolName, symbol, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(p.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase))
                     return true;
             return false;
+        }
+
+        private Position FindPosition(string symbolName, string label)
+        {
+            foreach (var p in Positions)
+                if (string.Equals(p.SymbolName, symbolName, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(p.Label, label, StringComparison.OrdinalIgnoreCase))
+                    return p;
+            return null;
         }
 
         private string ResolveSymbol(string tvSymbol)
         {
             if (Symbols.GetSymbol(tvSymbol) != null) return tvSymbol;
-            if (_symbolMappings.TryGetValue(tvSymbol, out var m)) return m;
 
-            var idx = tvSymbol.LastIndexOf(':');
-            if (idx >= 0 && idx < tvSymbol.Length - 1)
+            // Check from mappings
+            var parts = tvSymbol.Split(':');
+            if (parts.Length > 1)
             {
-                var suffix = tvSymbol.Substring(idx + 1);
+                string suffix = parts[parts.Length - 1];
                 if (Symbols.GetSymbol(suffix) != null) return suffix;
             }
 
-            Print($"Unmapped symbol '{tvSymbol}'. Add mapping: {tvSymbol}:CTRADER_SYMBOL");
-            return null;
-        }
+            // If mappings param was filled, split and check
+            if (!string.IsNullOrWhiteSpace(SymbolMappingsRaw))
+            {
+                foreach (var entry in SymbolMappingsRaw.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var mapParts = entry.Split(':');
+                    if (mapParts.Length >= 2)
+                    {
+                        var from = string.Join(":", mapParts, 0, mapParts.Length - 1).Trim();
+                        var to = mapParts[mapParts.Length - 1].Trim();
+                        if (string.Equals(from, tvSymbol, StringComparison.OrdinalIgnoreCase))
+                            return to;
+                    }
+                }
+            }
 
-        private long CalcVolume(Symbol symbol, double notional)
-        {
-            double price = (symbol.Ask + symbol.Bid) / 2.0;
-            if (price <= 0) return 0;
-            return (long)(notional / price);
+            Print($"Unmapped symbol '{tvSymbol}'");
+            return null;
         }
 
         private long NormVolume(Symbol symbol, long vol)
