@@ -5,9 +5,30 @@
  *   node test-webhook.mjs                                    # validation tests only
  *   node test-webhook.mjs --live                             # runs real cTrader trade
  *   node test-webhook.mjs --live --btc                       # BTC trade with larger notional
+ *
+ * Reads CTRADER_* env vars from .env file automatically.
  */
 
+import { readFileSync, existsSync } from 'fs';
 import { isConfigured, executeMarketOrder } from './api/ctrader-client.js';
+
+// ── Load .env file if it exists ──
+if (existsSync('.env')) {
+  const lines = readFileSync('.env', 'utf8').split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq > 0) {
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim().replace(/^['"]|['"]$/g, '');
+      if (key.startsWith('CTRADER_')) {
+        process.env[key] = val;
+      }
+    }
+  }
+  console.log('📄  Loaded CTRADER_* from .env\n');
+}
 
 const args = process.argv.slice(2);
 const isLive = args.includes('--live') || args.includes('--btc');
