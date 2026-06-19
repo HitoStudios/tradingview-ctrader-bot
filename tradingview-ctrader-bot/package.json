@@ -1,12 +1,12 @@
 {
   "name": "tradingview-ctrader-bot",
-  "version": "3.0.0",
-  "description": "TradingView webhook → Relay → cBot (WebSocket) for cTrader",
+  "version": "4.0.0",
+  "description": "TradingView webhook → cTrader Open API (WebSocket) — no cBot needed",
   "type": "module",
   "scripts": {
+    "start": "node ctrader-trader.mjs",
     "dev": "vercel dev",
     "deploy": "vercel --prod",
-    "relay": "node relay-server.mjs",
     "test": "node test-webhook.mjs"
   },
   "keywords": ["tradingview", "ctrader", "trading", "bot"],
