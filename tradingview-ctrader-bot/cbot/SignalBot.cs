@@ -146,7 +146,7 @@ namespace cAlgo.Robots
 
                 // Place market order with SL + TP1 on the position
                 Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP1={signal.Tp1}");
-                var result = await ExecuteMarketOrderAsync(
+                var result = ExecuteMarketOrderAsync(
                     tradeType, symbol.Name, volume, "TradingView", signal.Sl, signal.Tp1);
 
                 if (result?.Position == null)
@@ -176,7 +176,7 @@ namespace cAlgo.Robots
                         continue;
                     }
 
-                    var tpResult = await ExecuteLimitOrderAsync(
+                    var tpResult = ExecuteLimitOrderAsync(
                         opposite, symbol.Name, tpVol, tpPrices[i],
                         tpLabels[i] + "_" + pos.Id,
                         null, null, null, null, null, null);
