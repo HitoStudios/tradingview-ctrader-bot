@@ -146,17 +146,18 @@ namespace cAlgo.Robots
 
                 // Place market order with SL + TP1 on the position
                 Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP1={signal.Tp1}");
-                var result = ExecuteMarketOrderAsync(
+                var tradeOp = ExecuteMarketOrderAsync(
                     tradeType, symbol.Name, volume, "TradingView", signal.Sl, signal.Tp1);
 
-                if (result?.Position == null)
+                if (tradeOp.Status != TradeOperationStatus.Succeeded || 
+                    tradeOp.Result == null || tradeOp.Result.Positions.Count == 0)
                 {
-                    Print("Market order failed");
+                    Print($"Market order failed (Status={tradeOp.Status})");
                     await ConsumeAsync();
                     return;
                 }
 
-                var pos = result.Position;
+                var pos = tradeOp.Result.Positions[0];
                 Print($"Position opened: ID={pos.Id} Price={pos.EntryPrice} Vol={pos.Volume}");
 
                 // Place TP2 and TP3 as separate pending limit orders (partial closes)
@@ -176,15 +177,16 @@ namespace cAlgo.Robots
                         continue;
                     }
 
-                    var tpResult = ExecuteLimitOrderAsync(
+                    var limitOp = ExecuteLimitOrderAsync(
                         opposite, symbol.Name, tpVol, tpPrices[i],
                         tpLabels[i] + "_" + pos.Id,
                         null, null, null, null, null, null);
 
-                    if (tpResult != null && tpResult.Order != null)
+                    if (limitOp.Status == TradeOperationStatus.Succeeded && 
+                        limitOp.Result != null && limitOp.Result.Orders.Count > 0)
                         Print($"  {tpLabels[i]} limit order at {tpPrices[i]} for {tpVol}");
                     else
-                        Print($"  {tpLabels[i]} limit order failed at {tpPrices[i]}");
+                        Print($"  {tpLabels[i]} limit order failed at {tpPrices[i]} (Status={limitOp.Status})");
                 }
 
                 _lastProcessedSignalId = signal.Id;
