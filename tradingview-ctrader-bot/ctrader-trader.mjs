@@ -23,8 +23,8 @@ import { createServer } from 'http';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const IS_DEMO = process.env.CTRADER_DEMO === 'true';
-const HOST = IS_DEMO ? 'demoopenapi.ctrader.com' : 'liveopenapi.ctrader.com';
-const WSS_PORT = 19002;
+const HOST = IS_DEMO ? 'demo.ctraderapi.com' : 'live.ctraderapi.com';
+const WS_PORT = 5036;  // JSON WebSocket (5035 for Protobuf)
 const TOKEN_URL = 'https://openapi.ctrader.com/apps/token';
 
 // ─── Payload type constants (from cTrader proto definitions) ───
@@ -177,7 +177,7 @@ function scheduleReconnect() {
 async function connect() {
   if (_ws) return;
 
-  const url = `wss://${HOST}:${WSS_PORT}`;
+  const url = `ws://${HOST}:${WS_PORT}`;
   console.log(`[ctrader] Connecting to ${url}...`);
 
   // Dynamic import so Railway doesn't need it at build time
@@ -440,7 +440,7 @@ const httpServer = createServer((req, res) => {
 httpServer.listen(PORT, () => {
   console.log(`\n🤖  cTrader Trader server`);
   console.log(`    Environment: ${IS_DEMO ? 'DEMO' : 'LIVE'}`);
-  console.log(`    cTrader:     ${HOST}:${WSS_PORT}`);
+  console.log(`    WebSocket:   ws://${HOST}:${WS_PORT} (JSON)`);
   console.log(`    HTTP:        :${PORT}`);
   console.log(`    POST /webhook   ← TradingView signals`);
   console.log(`    GET  /health    ← Health check\n`);
