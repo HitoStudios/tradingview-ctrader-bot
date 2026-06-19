@@ -118,8 +118,8 @@ export async function executeMarketOrder(signal) {
   }
 
   // Volume: notional / entry price → units
-  // cTrader expects volume in units (e.g. 150000 for US100)
-  const volume = Math.round(signal.notional / signal.entry);
+  // Use 2 decimal places for fractional units (e.g. 0.08 BTC)
+  const volume = Math.round((signal.notional / signal.entry) * 100) / 100;
   if (volume <= 0) {
     throw new Error(`Invalid volume ${volume} for notional ${signal.notional} / entry ${signal.entry}`);
   }
