@@ -114,7 +114,8 @@ namespace cAlgo.Robots
 
                 var tradeType = isLong ? TradeType.Buy : TradeType.Sell;
                 double notional = signal.Notional > 0 ? signal.Notional : DefaultNotional;
-                long volume = NormVolume(symbol, (long)(notional / ((symbol.Ask + symbol.Bid) / 2.0)));
+                double midPrice = (symbol.Ask + symbol.Bid) / 2.0;
+                long volume = NormVolume(symbol, (long)(notional / midPrice));
                 if (volume <= 0)
                 {
                     Print($"Invalid volume {volume}");
@@ -122,14 +123,14 @@ namespace cAlgo.Robots
                     return;
                 }
 
-                // Place market order
+                // Place market order (SL and TP1 are set on the order)
                 Print($"Placing {tradeType} {symbol.Name} Vol={volume} SL={signal.Sl} TP1={signal.Tp1}");
                 var tradeOp = ExecuteMarketOrder(
                     tradeType, symbol.Name, volume, "TradingView", signal.Sl, signal.Tp1);
 
-                if (tradeOp == null || !string.IsNullOrEmpty(tradeOp.Error))
+                if (tradeOp == null || tradeOp.Error != null)
                 {
-                    Print($"Market order failed: {tradeOp?.Error ?? "null"}");
+                    Print($"Market order failed: {tradeOp?.Error}");
                     await ConsumeAsync();
                     return;
                 }
@@ -144,33 +145,6 @@ namespace cAlgo.Robots
                 }
 
                 Print($"Position opened: ID={pos.Id} Price={pos.EntryPrice} Vol={pos.Volume}");
-
-                // Place TP2 and TP3 as separate pending limit orders
-                var fractions = new[] { Tp1Fraction, Tp2Fraction, Tp3Fraction };
-                var tpPrices = new[] { signal.Tp1, signal.Tp2, signal.Tp3 };
-                var tpLabels = new[] { "TP1", "TP2", "TP3" };
-                var opposite = tradeType == TradeType.Buy ? TradeType.Sell : TradeType.Buy;
-
-                for (int i = 1; i < 3; i++)
-                {
-                    if (tpPrices[i] <= 0 || fractions[i] <= 0) continue;
-
-                    long tpVol = NormVolume(symbol, (long)((double)volume * fractions[i]));
-                    if (tpVol < symbol.VolumeInUnitsMin)
-                    {
-                        Print($"  {tpLabels[i]} vol {tpVol} < min — skipping");
-                        continue;
-                    }
-
-                    var limitOp = ExecuteLimitOrder(
-                        opposite, symbol.Name, tpVol, tpPrices[i],
-                        tpLabels[i] + "_" + pos.Id, null, null, null, null, null, null);
-
-                    if (limitOp != null && string.IsNullOrEmpty(limitOp.Error))
-                        Print($"  {tpLabels[i]} limit order at {tpPrices[i]} for {tpVol}");
-                    else
-                        Print($"  {tpLabels[i]} limit order failed: {limitOp?.Error ?? "null"}");
-                }
 
                 _lastProcessedSignalId = signal.Id;
                 await ConsumeAsync();
@@ -270,10 +244,12 @@ namespace cAlgo.Robots
 
         private long NormVolume(Symbol symbol, long vol)
         {
-            if (vol < symbol.VolumeInUnitsMin) vol = symbol.VolumeInUnitsMin;
-            long step = symbol.VolumeInUnitsStep;
-            if (step > 0) vol = (long)(Math.Round((double)vol / step) * step);
-            if (vol > symbol.VolumeInUnitsMax) vol = symbol.VolumeInUnitsMax;
+            double min = symbol.VolumeInUnitsMin;
+            double step = symbol.VolumeInUnitsStep;
+            double max = symbol.VolumeInUnitsMax;
+            if (vol < min) vol = (long)min;
+            if (step > 0) vol = (long)(Math.Round(vol / step) * step);
+            if (vol > max) vol = (long)max;
             return vol;
         }
 
