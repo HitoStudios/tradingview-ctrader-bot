@@ -17,7 +17,7 @@
  *   POST https://openapi.ctrader.com/v1/positions/market
  */
 
-const IDP_URL = 'https://idp.ctrader.com';
+const IDP_URL = 'https://openapi.ctrader.com';
 const API_URL = 'https://openapi.ctrader.com';
 
 // ─── In-memory token cache ───
