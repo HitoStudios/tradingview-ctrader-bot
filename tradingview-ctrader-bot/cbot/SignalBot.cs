@@ -258,14 +258,14 @@ namespace cAlgo.Robots
             return null;
         }
 
-        private long CalcVolume(ISymbol symbol, double notional)
+        private long CalcVolume(Symbol symbol, double notional)
         {
             double price = (symbol.Ask + symbol.Bid) / 2.0;
             if (price <= 0) return 0;
             return (long)(notional / price);
         }
 
-        private long NormVolume(ISymbol symbol, long vol)
+        private long NormVolume(Symbol symbol, long vol)
         {
             if (vol < symbol.VolumeInUnitsMin) vol = symbol.VolumeInUnitsMin;
             long step = symbol.VolumeInUnitsStep;
