@@ -14,7 +14,7 @@ if (-not $clientId) { $clientId = Read-Host "Enter your Client ID" }
 if (-not $clientSecret) { $clientSecret = Read-Host -AsSecureString "Enter your Client Secret"; $clientSecret = [System.Net.NetworkCredential]::new("", $clientSecret).Password }
 
 # ── Step 1: Open auth URL in browser ───────────────────
-$authUrl = "https://id.ctrader.com/my/settings/openapi/grantingaccess/?client_id=$clientId&redirect_uri=$([System.Web.HttpUtility]::UrlEncode($redirectUri))&scope=trading&product=web"
+$authUrl = "https://id.ctrader.com/my/settings/openapi/grantingaccess/?client_id=$clientId&redirect_uri=$redirectUri&scope=trading&product=web"
 
 Write-Host "`n🔗 Opening browser for cTrader login..." -ForegroundColor Cyan
 Write-Host "   URL: $authUrl`n" -ForegroundColor Gray
