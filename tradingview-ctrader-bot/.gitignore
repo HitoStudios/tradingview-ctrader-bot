@@ -1,3 +1,4 @@
 node_modules/
 .env
 .vercel
+.ctrader-tokens.json

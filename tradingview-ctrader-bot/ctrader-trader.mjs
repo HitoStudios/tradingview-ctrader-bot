@@ -60,18 +60,29 @@ const startTime = Date.now();
 
 // ─── Token ───
 
-async function refreshToken() {
+async function getAccessToken() {
+  // If an access token is provided directly, use it (lasts 30 days)
+  const directToken = process.env.CTRADER_ACCESS_TOKEN;
+  if (directToken) {
+    console.log('[token] Using CTRADER_ACCESS_TOKEN directly');
+    _accessToken = directToken;
+    return _accessToken;
+  }
+
+  // Otherwise refresh using the permanent refresh token
   const clientId = process.env.CTRADER_CLIENT_ID;
   const clientSecret = process.env.CTRADER_CLIENT_SECRET;
   const token = process.env.CTRADER_REFRESH_TOKEN;
 
   if (!clientId || !clientSecret || !token) {
-    throw new Error('CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, and CTRADER_REFRESH_TOKEN must be set');
+    throw new Error(
+      'Set CTRADER_ACCESS_TOKEN (preferred) OR CTRADER_CLIENT_ID + ' +
+      'CTRADER_CLIENT_SECRET + CTRADER_REFRESH_TOKEN'
+    );
   }
 
   console.log('[token] Refreshing access token...');
 
-  // Standard OAuth2: POST with form-encoded body
   const body = new URLSearchParams({
     grant_type: 'refresh_token',
     refresh_token: token,
@@ -225,7 +236,7 @@ async function runAuthFlow() {
   const clientSecret = process.env.CTRADER_CLIENT_SECRET;
 
   // Step 1: Get access token
-  const token = await refreshToken();
+  const token = await getAccessToken();
 
   // Step 2: Application auth
   console.log('[auth] Sending application auth...');

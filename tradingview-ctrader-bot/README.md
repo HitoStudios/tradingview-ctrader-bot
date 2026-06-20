@@ -41,37 +41,29 @@ TradingView Alert (JSON POST)
 1. Go to [https://openapi.ctrader.com](https://openapi.ctrader.com) → **Applications** → **Create**
 2. Enter any name (e.g. `TradingView Bot`) → **Save**
 3. Note your **Client ID** and **Client Secret**
-4. Add a **Redirect URI**: click Edit, scroll down, add `https://openapi.ctrader.com`
-5. Get a production token:
-   - Visit this URL in your browser (replace YOUR_CLIENT_ID):
-     ```
-     https://id.ctrader.com/my/settings/openapi/grantingaccess/?client_id=YOUR_CLIENT_ID&redirect_uri=https://openapi.ctrader.com&scope=trading&product=web
-     ```
-   - Login → **Allow access**
-   - Copy the `code` from the URL bar, then immediately run:
-     ```bash
-     curl -X GET 'https://openapi.ctrader.com/apps/token?grant_type=authorization_code&code=THE_CODE&redirect_uri=https://openapi.ctrader.com&client_id=YOUR_CLIENT_ID&client_secret=YOUR_CLIENT_SECRET' -H 'Accept: application/json'
-     ```
-   - Save the **refreshToken** from the response
+4. Add a **Redirect URI**: click Edit, scroll down, add `https://openapi.ctrader.com` → **Save**
+5. Get tokens — run the helper script:
+   ```powershell
+   .\get-token.ps1 -clientId "YOUR_CLIENT_ID" -clientSecret "YOUR_CLIENT_SECRET"
+   ```
+   It opens your browser → you login → click Allow → paste the URL → done.
+   It prints both an **access token** (lasts 30 days) and a **refresh token** (permanent).
 6. In cTrader, go to your account → note the numeric **Account ID**
 
-### Step 2: Deploy to Railway
+### Step 2: Deploy to Railway (choose one)
 
+**Quickest — access token (lasts 30 days):**
 ```bash
-cd tradingview-ctrader-bot
+railway vars set CTRADER_ACCESS_TOKEN=eyJ...    # from get-token.ps1
+railway vars set CTRADER_ACCOUNT_ID=your_account_id
+railway vars set CTRADER_DEMO=true
+```
 
-# Install Railway CLI & login
-npm install -g @railway/cli
-railway login
-
-# Deploy
-railway init
-railway up
-
-# Set environment variables
+**Better — refresh token (auto-renewing):**
+```bash
 railway vars set CTRADER_CLIENT_ID=your_client_id
 railway vars set CTRADER_CLIENT_SECRET=your_client_secret
-railway vars set CTRADER_REFRESH_TOKEN=your_refresh_token
+railway vars set CTRADER_REFRESH_TOKEN=your_permanent_refresh_token
 railway vars set CTRADER_ACCOUNT_ID=your_account_id
 railway vars set CTRADER_DEMO=true
 ```
@@ -172,6 +164,7 @@ Volume = `notional / entry price`, rounded to the symbol's step and clamped to m
 ```
 tradingview-ctrader-bot/
 ├── ctrader-trader.mjs       # ⭐ Main server (WebSocket + HTTP, deploy on Railway)
+├── get-token.ps1            # 🪄 One-click OAuth2 token helper (run this first)
 ├── .env.example             # Environment variables template
 ├── package.json             # Dependencies & scripts
 ├── test-webhook.mjs         # Validation tests
