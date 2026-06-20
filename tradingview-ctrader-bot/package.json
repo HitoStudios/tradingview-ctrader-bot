@@ -5,17 +5,17 @@
   "type": "module",
   "scripts": {
     "start": "node ctrader-trader.mjs",
-    "dev": "vercel dev",
-    "deploy": "vercel --prod",
     "test": "node test-webhook.mjs"
   },
-  "keywords": ["tradingview", "ctrader", "trading", "bot"],
+  "keywords": [
+    "tradingview",
+    "ctrader",
+    "trading",
+    "bot"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "ws": "^8.16.0"
-  },
-  "devDependencies": {
-    "vercel": "^34.0.0"
   }
 }
