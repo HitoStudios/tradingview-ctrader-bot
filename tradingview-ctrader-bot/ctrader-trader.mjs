@@ -69,16 +69,20 @@ async function refreshToken() {
     throw new Error('CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, and CTRADER_REFRESH_TOKEN must be set');
   }
 
-  const url = `${TOKEN_URL}?grant_type=refresh_token` +
-    `&refresh_token=${encodeURIComponent(token)}` +
-    `&client_id=${encodeURIComponent(clientId)}` +
-    `&client_secret=${encodeURIComponent(clientSecret)}`;
-
   console.log('[token] Refreshing access token...');
 
-  const res = await fetch(url, {
+  // Standard OAuth2: POST with form-encoded body
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: token,
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+
+  const res = await fetch(TOKEN_URL, {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
   });
 
   if (!res.ok) {
@@ -124,29 +128,34 @@ function onMessage(data) {
 
   const pt = msg.payloadType;
 
-  // Route to pending waiter first
-  if (_pendingMsg && _pendingMsg.expectedTypes.includes(pt)) {
-    clearTimeout(_pendingMsg.timer);
-    const resolve = _pendingMsg.resolve;
-    _pendingMsg = null;
-    resolve(msg);
-    return;
-  }
-
-  // Heartbeat
+  // ── Heartbeat ──────────────────────────────────────────────
   if (pt === PT.HEARTBEAT_EVENT) {
     send({ payloadType: PT.HEARTBEAT_EVENT });
     return;
   }
 
-  // Error
+  // ── Error — always reject, never resolve ───────────────────
+  // Must come before the pending-message router, otherwise
+  // ERROR_RES gets RESOLVED as a success value and the real
+  // cTrader error message is silently swallowed.
   if (pt === PT.ERROR_RES) {
-    console.error('[ctrader] API error:', msg.description || msg.errorCode || JSON.stringify(msg));
+    const errMsg = `${msg.errorCode || 'ERROR'}: ${msg.description || JSON.stringify(msg)}`;
+    console.error('[ctrader] API error:', errMsg);
     if (_pendingMsg) {
       clearTimeout(_pendingMsg.timer);
-      _pendingMsg.reject(new Error(msg.description || `cTrader error ${msg.errorCode}`));
+      const reject = _pendingMsg.reject;
       _pendingMsg = null;
+      reject(new Error(errMsg));
     }
+    return;
+  }
+
+  // ── Route to pending waiter ────────────────────────────────
+  if (_pendingMsg && _pendingMsg.expectedTypes.includes(pt)) {
+    clearTimeout(_pendingMsg.timer);
+    const resolve = _pendingMsg.resolve;
+    _pendingMsg = null;
+    resolve(msg);
     return;
   }
 }
@@ -195,6 +204,8 @@ async function connect() {
       await runAuthFlow();
       await loadSymbols();
       _ready = true;
+      // Start sending heartbeats every 9s (cTrader drops idle connections after ~10s)
+      _heartbeatTimer = setInterval(() => send({ payloadType: PT.HEARTBEAT_EVENT }), 9000);
       console.log('[ctrader] ✅ Ready to trade!');
     } catch (err) {
       console.error('[ctrader] Auth failed:', err.message);
@@ -219,26 +230,26 @@ async function runAuthFlow() {
   // Step 2: Application auth
   console.log('[auth] Sending application auth...');
   send({ payloadType: PT.APPLICATION_AUTH_REQ, clientId, clientSecret });
-  const appRes = await waitForMsg([PT.APPLICATION_AUTH_RES, PT.ERROR_RES]);
+  const appRes = await waitForMsg([PT.APPLICATION_AUTH_RES]);
   console.log('[auth] Application authorized');
 
   // Step 3: Get account list by access token
   console.log('[auth] Getting account list...');
   send({ payloadType: PT.GET_ACCOUNT_LIST_BY_ACCESS_TOKEN_REQ, accessToken: token });
-  const listRes = await waitForMsg([PT.GET_ACCOUNT_LIST_BY_ACCESS_TOKEN_RES, PT.ERROR_RES]);
+  const listRes = await waitForMsg([PT.GET_ACCOUNT_LIST_BY_ACCESS_TOKEN_RES]);
 
   // Step 4: Account auth
   _accountId = parseInt(process.env.CTRADER_ACCOUNT_ID, 10);
   console.log(`[auth] Authenticating account ${_accountId}...`);
   send({ payloadType: PT.ACCOUNT_AUTH_REQ, ctidTraderAccountId: _accountId, accessToken: token });
-  const accRes = await waitForMsg([PT.ACCOUNT_AUTH_RES, PT.ERROR_RES]);
+  const accRes = await waitForMsg([PT.ACCOUNT_AUTH_RES]);
   console.log('[auth] Account authorized');
 }
 
 async function loadSymbols() {
   console.log('[symbols] Loading symbols...');
   send({ payloadType: PT.GET_SYMBOLS_REQ, ctidTraderAccountId: _accountId });
-  const res = await waitForMsg([PT.GET_SYMBOLS_RES, PT.ERROR_RES]);
+  const res = await waitForMsg([PT.GET_SYMBOLS_RES]);
 
   if (res.payloadType === PT.GET_SYMBOLS_RES && Array.isArray(res.symbol)) {
     _symbolMap = {};
@@ -341,7 +352,7 @@ async function executeMarketOrder(signal) {
   console.log(`[trade] Placing ${payload.tradeSide} ${ctSymbol} vol=${volumeUnits} (step=${step}, min=${symInfo.min})...`);
 
   send(payload);
-  const res = await waitForMsg([PT.CREATE_MARKET_ORDER_RES, PT.ERROR_RES], 20000);
+  const res = await waitForMsg([PT.CREATE_MARKET_ORDER_RES], 20000);
 
   console.log('[trade] Result:', JSON.stringify(res));
 
