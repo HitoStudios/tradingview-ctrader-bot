@@ -177,13 +177,16 @@ function scheduleReconnect() {
 async function connect() {
   if (_ws) return;
 
-  const url = `ws://${HOST}:${WS_PORT}`;
+  const url = `wss://${HOST}:${WS_PORT}`;
   console.log(`[ctrader] Connecting to ${url}...`);
 
   // Dynamic import so Railway doesn't need it at build time
   const { default: WebSocket } = await import('ws');
 
-  _ws = new WebSocket(url);
+  _ws = new WebSocket(url, {
+    rejectUnauthorized: false,
+    handshakeTimeout: 15000,
+  });
 
   _ws.on('open', async () => {
     _connected = true;
